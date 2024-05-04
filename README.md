@@ -1,8 +1,8 @@
 # VCC-Mini-Project
-Commands:
 
-sudo docker compose -f docker-compose.yml build --no-cache
+Follow the same directory structure as given.
 
-sudo docker compose -f docker-compose.yml up
+Command to run the loadbalancer:
+sudo python3 loadbalancer.py
 
-sudo docker compose -f docker-compose.yml down 
+##No need to build image explicitly only running the above given command is enough##
