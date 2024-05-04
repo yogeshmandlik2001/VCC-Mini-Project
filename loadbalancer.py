@@ -1,54 +1,64 @@
 import os
 import time
 import docker
-from flask import Flask, request
 import requests
+import subprocess
+from flask import Flask, request
+import threading
 
 app = Flask(__name__)
-
-# Initial list of backend servers
+# Separate locks for adding and removing servers
+add_lock = threading.Lock()
+remove_lock = threading.Lock()
 backend_servers = []
 current_server_index = 0
 last_used_port = 5000
 
 os.system('docker build -t flask_app .')
 
-# Function to select a backend server using round-robin scheduling
 def get_backend_server():
     global current_server_index
     current_server = backend_servers[current_server_index]
     current_server_index = (current_server_index + 1) % len(backend_servers)
     return current_server
 
+def container_exists(container_name):
+    output = os.popen(f'sudo docker ps -a --filter "name={container_name}" --format "{{.Names}}"').read().strip()
+    return container_name in output.split("\n")
+
 def add_backend_server():
-    global backend_servers, last_used_port
-    new_port = last_used_port + 1
-    os.system(f'docker run -p {new_port}:4900 -d --name flask{len(backend_servers) + 1} flask_app')
-    container_name = f"flask{len(backend_servers) + 1}"
-    new_server = {"url": f"http://localhost:{new_port}", "container": container_name,"queued_requests": 0, "last_active": time.time()}
-    backend_servers.append(new_server)
-    last_used_port = new_port
+    global last_used_port, backend_servers
+    while True:
+        with add_lock:
+            if all(server["queued_requests"] >= 1 for server in backend_servers) or len(backend_servers) <= 3:
+                new_port = last_used_port + 1
+                last_used_port = new_port
+                container_name = f"flask{len(backend_servers) + 7}"
+                try:
+                    os.system(f'sudo docker run -p {new_port}:4900 -d --name {container_name} flask_app')
+                    new_server = {"url": f"http://localhost:{new_port}", "container": container_name, "queued_requests": 0, "last_active": time.time()}
+                    backend_servers.append(new_server)
+                except Exception as e:
+                        print(f"Error adding backend server: {str(e)}")
+        time.sleep(1)
 
-
-# Function to remove additionally added servers if no request is sent to the server for a significant amount of time and it's unhealthy
 def remove_inactive_servers():
-    global backend_servers
-    current_time = time.time()
-    for server in backend_servers[:]:
-        if current_time - server["last_active"] > 300:  # 300 seconds = 5 minutes
-            os.system(f"docker stop {server['container']}")
-            os.system(f"docker rm {server['container']}")
-            backend_servers.remove(server)
+    while True:
+        if(len(backend_servers) > 4):
+            with remove_lock:
+                current_time = time.time()
+                servers_to_remove = [server for server in backend_servers if current_time - server["last_active"] > 60]  
+                for server in servers_to_remove:
+        
+                    try:
+                        os.system(f"sudo docker stop {server['container']}")
+                        os.system(f"sudo docker rm {server['container']}")
+                    except Exception as e:
+                        print(f"Error removing server: {str(e)}")
+            time.sleep(1)
 
-
-# Route to handle incoming requests
 @app.route('/')
 def index():
-    remove_inactive_servers()
-    
-    if all(server["queued_requests"] >= 1 for server in backend_servers):
-        add_backend_server()
-        
     backend_server = get_backend_server()
     backend_server["queued_requests"] += 1
     
@@ -60,11 +70,7 @@ def index():
     except requests.exceptions.RequestException as e:
         return f"Error occurred while processing the request: {str(e)}", 500
 
-
-
-# Add a backend server at the start
-add_backend_server() 
-# Main function to run the Flask application
 if __name__ == '__main__':
-    # Run the Flask load balancer
+    threading.Thread(target=add_backend_server, daemon=True).start()
+    threading.Thread(target=remove_inactive_servers, daemon=True).start()
     app.run(debug=True, host='0.0.0.0', port=4900)
